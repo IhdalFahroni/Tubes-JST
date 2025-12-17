@@ -1,78 +1,105 @@
+---
 
-### **1. Konfigurasi Hiperparameter (*Hyperparameters*)**
+### **1. Konfigurasi Lingkungan & Variabel Global**
 
-Pemilihan hiperparameter didasarkan pada keseimbangan antara efisiensi komputasi dan kemampuan model untuk konvergen (mencapai solusi optimal).
+#### **A. Perangkat Keras (Hardware Settings)**
 
-* **Ukuran Citra (`IMG_SIZE = 160`)**
-    * **Justifikasi:** Resolusi $160 \times 160$ piksel dipilih sebagai titik tengah yang optimal. Resolusi ini cukup besar untuk mempertahankan fitur visual penting (seperti pola bercak pada daun) namun cukup kecil untuk meminimalkan beban komputasi (VRAM GPU).
-    * **Konteks:** Model seperti MobileNetV2 dilatih pada resolusi standar $224 \times 224$. Menguranginya menjadi 160 mempercepat pelatihan sekitar 30-40% dengan penalti akurasi yang minimal pada dataset yang fitur visualnya cukup distingtif seperti penyakit tanaman.
+* **`mixed_precision.set_global_policy('mixed_float16')`**
+* **Justifikasi:** Mengubah komputasi dari float32 (32-bit) menjadi campuran float16 dan float32. Ini dipilih untuk **menghemat VRAM GPU hingga 50%** dan mempercepat waktu *training* pada GPU NVIDIA modern (yang memiliki Tensor Cores), tanpa mengurangi akurasi model secara signifikan.
 
-* **Ukuran Batch (`BATCH_SIZE = 16`)**
-    * **Justifikasi:** Ukuran batch kecil (16) dipilih karena dua alasan. Pertama, keterbatasan memori (terutama saat melatih model berat seperti VGG16). Kedua, batch kecil memberikan efek *regularisasi* karena estimasi gradien yang lebih bising (*noisy*), yang sering kali membantu model menghindari *local minima* yang tajam dan mencapai generalisasi yang lebih baik.
 
-* **Laju Pembelajaran (`LEARNING_RATE = 0.0001`)**
-    * **Justifikasi:** Nilai $10^{-4}$ adalah standar emas untuk *Fine-Tuning*. Karena kita menggunakan model pra-latih (Transfer Learning), bobot awal model sudah sangat baik. Laju pembelajaran yang terlalu besar (misal $0.001$) berisiko "menghancurkan" fitur-fitur berharga yang sudah dipelajari model dari ImageNet. Kita ingin model beradaptasi secara perlahan (*subtle adaptation*).
+* **`tf.config.experimental.set_memory_growth(gpu, True)`**
+* **Justifikasi:** Mencegah TensorFlow mengalokasikan *seluruh* memori GPU sejak awal (yang bisa membuat komputer *hang*). Ini memaksa alokasi memori secara dinamis sesuai kebutuhan proses.
 
-* **Jumlah Epoch (`EPOCHS = 10`)**
-    * **Justifikasi:** Dalam konteks *Transfer Learning* pada dataset yang relatif sederhana (klasifikasi daun dengan fitur jelas), model cenderung konvergen dengan sangat cepat. Melatih lebih dari 10-20 epoch sering kali hanya menghasilkan *overfitting* (menghafal data latih) tanpa peningkatan signifikan pada data validasi.
+
+
+#### **B. Hiperparameter (Hyperparameters)**
+
+* **`IMG_SIZE = 160`**
+* **Justifikasi:** Resolusi 160 \times 160 dipilih sebagai kompromi antara **detail visual dan beban komputasi**. Meskipun standar ImageNet adalah 224 \times 224, resolusi 160 mengurangi jumlah piksel yang harus diproses sekitar 50%, mempercepat pelatihan secara drastis. Penyakit daun (bercak/tekstur) biasanya masih dapat diidentifikasi dengan jelas pada resolusi ini.
+
+
+* **`BATCH_SIZE = 16`**
+* **Justifikasi:** Ukuran *batch* kecil dipilih karena dua alasan:
+1. **Memori:** Memungkinkan pelatihan model berat (seperti VGG16) tanpa *Out of Memory*.
+2. **Generalisasi:** *Batch* kecil menghasilkan estimasi gradien yang lebih *noisy*, yang bertindak sebagai regularisasi implisit, membantu model keluar dari *local minima* dan mencapai generalisasi yang lebih baik.
+
+
+
+
+* **`EPOCHS = 10`**
+* **Justifikasi:** Karena menggunakan **Transfer Learning**, model *pre-trained* sudah memiliki fitur ekstraktor yang sangat baik. Konvergensi (pembelajaran) pada dataset baru biasanya terjadi sangat cepat (di bawah 10 epoch). Melatih lebih lama berisiko *overfitting* (menghafal data latih).
+
+
+* **`LEARNING_RATE = 0.0001` (1e-4)**
+* **Justifikasi:** Nilai konservatif (kecil) dipilih. Karena kita melakukan *fine-tuning* pada model yang sudah dilatih, kita tidak ingin mengubah bobot *pre-trained* secara drastis (*catastrophic forgetting*). Laju ini memastikan penyesuaian bobot terjadi secara halus.
+
+
 
 ---
 
-### **2. Strategi Data (*Data Strategy*)**
+### **2. Preprocessing & Augmentasi Data**
 
-Keputusan terkait data difokuskan pada validitas input dan penanganan bias.
+- **`ImageDataGenerator` (Augmentasi On-the-fly)**
+- **Justifikasi:** Dipilih agar variasi data dibuat secara _real-time_ saat training, bukan disimpan statis di hardisk. Ini menghemat penyimpanan dan memberikan variasi yang hampir tak terbatas.
 
-* **Pembagian Data (`SPLIT_RATIO = 0.2`)**
-    * **Justifikasi:** Rasio Pareto (80:20) adalah standar industri. 80% data untuk pelatihan memberikan variasi yang cukup bagi model untuk belajar, sedangkan 20% data validasi cukup representatif untuk mengukur performa model tanpa bias statistik yang signifikan.
+- **Parameter: `rotation=40`, `shift`, `shear`, `zoom`, `horizontal_flip**`
+- **Justifikasi:** Daun di alam tidak memiliki orientasi baku (bisa miring, terbalik, terpotong, atau diambil dari jarak berbeda). Augmentasi ini memaksa model untuk belajar fitur **invarian** (mengenali penyakit terlepas dari posisi/rotasi daun), bukan menghafal piksel di posisi tertentu.
 
-* **Augmentasi Data (`rotation`, `shift`, `zoom`, `flip`)**
-    * **Justifikasi:** Daun di alam bebas tidak memiliki orientasi kanonik (bisa terbalik, miring, atau terpotong). Augmentasi menyimulasikan variasi fisik ini secara sintetis. Ini memaksa model untuk belajar fitur **invarian** (tahan terhadap perubahan posisi/rotasi), bukan sekadar menghafal piksel pada posisi tertentu.
-
-* **Pembobotan Kelas (`class_weight`)**
-    * **Justifikasi:** Dataset penyakit tanaman sering kali tidak seimbang (contoh: sampel penyakit 'Esca' jauh lebih banyak daripada 'Healthy'). Tanpa pembobotan, model akan bias memprediksi kelas mayoritas untuk meminimalkan *error* global secara curang. `class_weight='balanced'` memberikan penalti gradien yang lebih besar jika model salah memprediksi kelas minoritas, memaksa model memperlakukan semua kelas dengan prioritas yang setara.
+- **`class_weight='balanced'`**
+- **Justifikasi:** Mengatasi **ketidakseimbangan dataset**. Jika jumlah foto "Sehat" jauh lebih banyak dari "Sakit", model cenderung bias menebak "Sehat". _Class Weight_ memberikan penalti _loss_ lebih besar jika model salah menebak kelas minoritas, memaksa model berlaku adil pada semua kelas.
 
 ---
 
-### **3. Pemilihan Arsitektur Model**
+### **3. Arsitektur Model: Custom CNN**
 
-Pemilihan model dirancang untuk membandingkan spektrum kompleksitas yang luas.
+Bagian ini adalah _baseline_ (model dasar) yang dirancang dari nol untuk memvalidasi apakah arsitektur sederhana sudah cukup.
 
-* **Custom CNN (Baseline)**
-    * **Justifikasi:** Berfungsi sebagai *control variable*. Jika model sederhana ini mencapai akurasi tinggi, maka penggunaan model *Deep Learning* yang kompleks mungkin berlebihan (*overkill*). Ini membantu memvalidasi apakah masalah ini benar-benar membutuhkan kapasitas model yang besar.
+- **1. Layer Konvolusi (`Conv2D`)**
+- **Filter (32, 64, 128):** Jumlah filter meningkat secara bertahap (_pyramid architecture_). Layer awal (32) menangkap fitur sederhana (garis, tepi), layer tengah (64) menangkap bentuk (lingkaran bercak), dan layer akhir (128) menangkap fitur kompleks (pola penyakit spesifik).
+- **Kernel Size (3, 3):** Ukuran standar yang efisien untuk menangkap detail lokal tanpa parameter berlebih.
+- **Padding='same':** Memastikan dimensi output gambar sama dengan input, mencegah informasi di pinggir gambar hilang.
+- **Activation='relu':** Memperkenalkan non-linearitas, memungkinkan model mempelajari pola kompleks dan mempercepat konvergensi dibanding Sigmoid/Tanh.
 
-* **MobileNetV2**
-    * **Justifikasi:** Mewakili arsitektur **efisiensi tinggi**. Menggunakan *Depthwise Separable Convolution* untuk meminimalkan parameter. Sangat relevan untuk skenario implementasi di perangkat seluler (*edge computing*) di pertanian.
+- **2. `BatchNormalization` (setelah setiap Conv)**
+- **Justifikasi:** Menormalkan output dari layer sebelumnya agar memiliki mean 0 dan variansi 1. Ini menstabilkan proses pelatihan, mengurangi masalah _internal covariate shift_, dan mempercepat belajar.
 
-* **EfficientNetB0**
-    * **Justifikasi:** Mewakili **State-of-the-Art (SOTA)** dalam keseimbangan akurasi-efisiensi. Menggunakan *Compound Scaling* yang secara matematis menyeimbangkan kedalaman, lebar, dan resolusi jaringan. Sering kali memberikan performa terbaik dengan parameter minimal.
+- **3. `MaxPooling2D(2, 2)**`
+- **Justifikasi:** Melakukan _downsampling_ (mengurangi dimensi spasial setengahnya). Ini mengurangi jumlah parameter yang harus dihitung dan membuat model lebih tahan terhadap pergeseran kecil (_translation invariance_).
 
-* **ResNet50V2 & DenseNet121**
-    * **Justifikasi:** Mewakili arsitektur **berkapasitas tinggi**. ResNet mengatasi masalah *vanishing gradient* dengan koneksi residual, sementara DenseNet memaksimalkan aliran informasi antar layer. Dipilih untuk melihat apakah fitur yang sangat dalam (*deep features*) diperlukan untuk membedakan penyakit yang mirip.
+- **4. `GlobalAveragePooling2D` (GAP)**
+- **Justifikasi:** Dipilih menggantikan `Flatten`. `Flatten` akan mengubah peta fitur 3D menjadi vektor 1D raksasa yang membutuhkan jutaan parameter di layer Dense berikutnya (rentan _overfitting_). GAP merata-rata setiap peta fitur, mengurangi dimensi secara drastis namun tetap mempertahankan informasi spasial global. Ini membuat model jauh lebih ringan.
 
-* **VGG16**
-    * **Justifikasi:** Mewakili arsitektur **klasik dan berat**. Meskipun sering kali kalah efisien dari model modern, VGG16 memiliki struktur ekstraksi fitur yang sangat kuat dan sering kali lebih stabil untuk dataset tekstur. Dimasukkan sebagai pembanding historis.
+- **5. `Dense(256)` dengan `kernel_regularizer=l2(0.001)**`
+- **Justifikasi:** Layer _fully connected_ untuk penalaran tingkat tinggi. Penambahan **L2 Regularization** memberikan penalti pada bobot yang terlalu besar, mencegah model terlalu bergantung pada satu fitur saja (mencegah _overfitting_).
 
----
+- **6. `Dropout(0.5)**`
+- **Justifikasi:** Teknik regularisasi agresif. Mematikan 50% neuron secara acak selama pelatihan. Ini memaksa jaringan untuk membangun jalur fitur yang berlebihan (_redundant_), sehingga model menjadi lebih _robust_ (tangguh) dan tidak sekadar menghafal.
 
-### **4. Konfigurasi Pelatihan (*Training Configuration*)**
-
-* **Pengoptimal (*Optimizer*) Adam**
-    * **Justifikasi:** Adam (*Adaptive Moment Estimation*) dipilih karena kemampuannya menyesuaikan laju pembelajaran untuk setiap parameter secara individu. Ini sangat efektif untuk masalah dengan data yang jarang (*sparse*) atau *noisy*, dan umumnya konvergen lebih cepat daripada SGD standar tanpa memerlukan penyetelan hiperparameter yang rumit.
-
-* **Fungsi Kerugian (*Loss Function*) Categorical Crossentropy**
-    * **Justifikasi:** Karena ini adalah masalah klasifikasi multi-kelas (lebih dari 2 penyakit), *Categorical Crossentropy* adalah fungsi matematis yang tepat untuk mengukur perbedaan (divergensi) antara distribusi probabilitas prediksi model dan label sebenarnya (One-Hot Encoding).
-
-* **Kebijakan Mixed Precision (`float16`)**
-    * **Justifikasi:** Menggunakan presisi 16-bit pada GPU modern (NVIDIA Tensor Cores) mempercepat operasi matriks secara drastis dan mengurangi penggunaan memori hingga 50%, memungkinkan penggunaan *batch size* atau model yang lebih besar tanpa mengorbankan akurasi model secara berarti.
+- **7. `Dense(num_classes, activation='softmax')**`
+- **Justifikasi:** Layer output wajib untuk klasifikasi multi-kelas. `Softmax` mengubah output mentah menjadi distribusi probabilitas yang totalnya 1.0 (100%).
 
 ---
 
-### **5. Mekanisme Kontrol (*Callbacks*)**
+### **4. Arsitektur Model: Transfer Learning**
 
-Meskipun tidak secara eksplisit ditulis dalam konfigurasi awal sel 4 (ditambahkan kemudian pada sel pelatihan MobileNet), mekanisme ini krusial:
+Pemilihan model _pre-trained_ didasarkan pada karakteristik unik masing-masing:
 
-* **Early Stopping**
-    * **Justifikasi:** Mencegah pemborosan sumber daya dan *overfitting*. Jika akurasi validasi tidak membaik setelah beberapa epoch (misal: 3 epoch), pelatihan dihentikan karena model dianggap sudah jenuh atau mulai menghafal data.
+1. **MobileNetV2:** Dipilih karena **efisiensi**. Menggunakan _Depthwise Separable Convolution_. Sangat cocok untuk simulasi jika model nantinya akan dideploy di HP petani (Edge AI).
+2. **ResNet50V2:** Dipilih karena kemampuan **Deep Learning**. Menggunakan _Residual Connections_ (skip connection) yang mengatasi masalah _vanishing gradient_, memungkinkan jaringan yang sangat dalam belajar tanpa degradasi.
+3. **VGG16:** Dipilih sebagai **pembanding klasik**. Arsitektur ini sederhana namun sangat berat parameternya. Bagus untuk mengekstrak tekstur, namun biasanya lambat.
+4. **EfficientNetB0:** Dipilih sebagai **State-of-the-Art (SOTA)**. Menggunakan _Compound Scaling_ yang menyeimbangkan kedalaman, lebar, dan resolusi secara optimal. Biasanya memberikan akurasi tertinggi dengan parameter minimal.
+5. **DenseNet121:** Dipilih karena **Feature Reuse**. Setiap layer terhubung ke layer lainnya. Sangat bagus untuk dataset kecil karena aliran gradien sangat lancar (memaksimalkan informasi dari setiap gambar).
 
-* **ReduceLROnPlateau**
-    * **Justifikasi:** Strategi "penghalusan". Ketika penurunan *loss* mulai melambat (stagnan), laju pembelajaran dikurangi (misal: dibagi 2 atau 5). Ini memungkinkan model untuk mengambil langkah yang lebih kecil dan hati-hati dalam ruang gradien, sering kali membantu model keluar dari *saddle points* dan mencapai akurasi yang sedikit lebih tinggi.
+---
+
+### **5. Proses Pelatihan (Training Loop)**
+
+- **Optimizer: `Adam**`
+- **Justifikasi:** Adam (_Adaptive Moment Estimation_) dipilih dibanding SGD karena ia menyesuaikan laju pembelajaran (_learning rate_) untuk setiap parameter secara individu. Ini membuatnya konvergen lebih cepat dan lebih sedikit membutuhkan penyetelan manual.
+
+- **Loss Function: `categorical_crossentropy**`
+- **Justifikasi:** Fungsi kerugian standar untuk masalah klasifikasi multi-kelas (>2 kelas) dengan label _one-hot encoded_.
+
+- **`tf.keras.backend.clear_session()` & `gc.collect()**`
+- **Justifikasi:** Karena proses ini melatih 6 model secara berurutan dalam satu _loop_, memori RAM/GPU akan cepat penuh. Perintah ini secara eksplisit menghapus model lama dari memori sebelum memuat model baru, mencegah _crash_ (Out of Memory).
